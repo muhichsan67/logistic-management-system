@@ -4,12 +4,21 @@ import { useRouter } from 'vue-router'
 
 const email = ref('eko.customer@gmail.com')
 const password = ref('')
-
 const router = useRouter()
 
 const handleLogin = () => {
-  // Langsung pindah ke halaman customer
-  router.push('/customer')
+  // Cek emailnya siapa
+  if (email.value === 'admin@alur.com') {
+    // Kalau admin, masuk ke halaman admin
+    router.push('/admin')
+  } else if (email.value === 'budi.courier@alur.com') {
+    // Nanti kalau halaman kurir udah jadi, aktifin ini
+    // router.push('/courier') 
+    alert('Halaman kurir belum dibuat!')
+  } else {
+    // Kalau customer (atau email lain), masuk ke halaman customer
+    router.push('/customer')
+  }
 }
 </script>
 
