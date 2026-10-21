@@ -8,15 +8,11 @@ const router = useRouter()
 
 const handleLogin = () => {
   // Cek emailnya siapa
-  if (email.value === 'admin@alur.com') {
-    // Kalau admin, masuk ke halaman admin
+    if (email.value === 'admin@alur.com') {
     router.push('/admin')
   } else if (email.value === 'budi.courier@alur.com') {
-    // Nanti kalau halaman kurir udah jadi, aktifin ini
-    // router.push('/courier') 
-    alert('Halaman kurir belum dibuat!')
+    router.push('/courier') // <-- Sekarang udah bisa nembak ke sini
   } else {
-    // Kalau customer (atau email lain), masuk ke halaman customer
     router.push('/customer')
   }
 }
