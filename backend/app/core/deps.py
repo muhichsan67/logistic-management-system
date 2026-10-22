@@ -11,6 +11,7 @@ from collections.abc import Callable
 from core.config import settings
 from db.session import get_session
 from db.models.user import User
+from core.errors import error_payload
 
 from db.models.user import UserRole
 
@@ -28,7 +29,11 @@ async def get_current_user(
 ) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired token",
+        detail=error_payload(
+            "Invalid or expired token",
+            status.HTTP_401_UNAUTHORIZED,
+            "UNAUTHORIZED",
+        ),
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -57,7 +62,11 @@ async def get_current_user(
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
+            detail=error_payload(
+                "User account is inactive",
+                status.HTTP_403_FORBIDDEN,
+                "FORBIDDEN",
+            ),
         )
 
     return user
@@ -78,7 +87,11 @@ def require_roles(
         if current_user.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="You don't have permission to access this resource",
+                detail=error_payload(
+                    "You don't have permission to access this resource",
+                    status.HTTP_403_FORBIDDEN,
+                    "FORBIDDEN",
+                ),
             )
 
         return current_user

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
 
+from core.errors import error_payload
 from db.session import SessionDep
 
 # Models
@@ -26,7 +26,11 @@ async def login(session: SessionDep, credentials: LoginPayload):
     except ValueError as exc:
         raise HTTPException(
             status_code=401,
-            detail=str(exc),
+            detail=error_payload(
+                str(exc),
+                status.HTTP_401_UNAUTHORIZED,
+                "UNAUTHORIZED",
+            ),
         ) from exc
 
     return {
@@ -46,7 +50,11 @@ async def register(session: SessionDep, payload: RegisterPayload):
     except ValueError as exc:
         raise HTTPException(
             status_code=409,
-            detail=str(exc),
+            detail=error_payload(
+                str(exc),
+                status.HTTP_409_CONFLICT,
+                "DUPLICATE",
+            ),
         ) from exc
 
     return {
