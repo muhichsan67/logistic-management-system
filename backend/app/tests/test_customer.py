@@ -11,15 +11,20 @@ from db.models.user import UserRole
 from routers.shipment import (
     confirm_shipment,
     create_shipment,
+    get_courier_shipments,
     get_my_shipments,
     get_shipment_detail,
     track_shipment,
+    update_courier_shipment_status,
 )
-from schemas.shipment import ShipmentCreatePayload
+from schemas.shipment import ShipmentCreatePayload, ShipmentStatusUpdatePayload
 from services.shipment import (
     confirm_shipment_service,
     create_shipment_service,
+    get_courier_shipments_service,
     get_customer_shipments_service,
+    get_shipment_tracking_service,
+    update_courier_shipment_status_service,
 )
 
 
@@ -56,6 +61,8 @@ def test_create_shipment_service_adds_shipment_and_initial_history(customer):
         result = run(
             create_shipment_service(
                 ShipmentCreatePayload(
+                    origin_address="Origin",
+                    sender_phone="081234567890",
                     recipient_name="Recipient",
                     recipient_phone="081234567893",
                     destination_address="Destination",
@@ -151,10 +158,233 @@ def test_customer_shipments_service_scopes_to_customer_and_paginates():
     session.scalars.assert_awaited_once()
 
 
+def test_courier_shipments_service_scopes_to_courier_and_searches_tracking_number():
+    session = AsyncMock()
+    session.add = Mock()
+    session.scalar.return_value = 1
+    session.scalars.return_value = SimpleNamespace(
+        all=lambda: ["assigned-shipment"]
+    )
+
+    response = run(
+        get_courier_shipments_service(
+            courier_id=20,
+            session=session,
+            tracking_number="TRX-20261023",
+            page=2,
+            limit=10,
+        )
+    )
+
+    assert response == {
+        "items": ["assigned-shipment"],
+        "total": 1,
+        "page": 2,
+        "limit": 10,
+    }
+    session.scalar.assert_awaited_once()
+    session.scalars.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("current_status", "next_status"),
+    [
+        (ShipmentStatus.ASSIGNED, ShipmentStatus.PICKED_UP),
+        (ShipmentStatus.PICKED_UP, ShipmentStatus.IN_TRANSIT),
+    ],
+)
+def test_courier_status_service_advances_sequentially(
+    courier,
+    current_status,
+    next_status,
+):
+    shipment = make_shipment(status=current_status)
+    shipment.courier_id = courier.id
+    session = AsyncMock()
+    session.add = Mock()
+    session.scalar.return_value = shipment
+
+    result = run(
+        update_courier_shipment_status_service(
+            shipment.id,
+            courier.id,
+            next_status,
+            session,
+        )
+    )
+
+    assert result.status == next_status
+    history = session.add.call_args.args[0]
+    assert history.status == next_status
+    assert history.created_by == courier.id
+    session.commit.assert_awaited_once()
+
+
+def test_courier_status_service_requires_proof_for_delivery(courier):
+    shipment = make_shipment(status=ShipmentStatus.IN_TRANSIT)
+    shipment.courier_id = courier.id
+    session = AsyncMock()
+    session.add = Mock()
+    session.scalar.return_value = shipment
+
+    with pytest.raises(ValueError, match="proof_image_url"):
+        run(
+            update_courier_shipment_status_service(
+                shipment.id,
+                courier.id,
+                ShipmentStatus.DELIVERED,
+                session,
+            )
+        )
+
+    session.commit.assert_not_awaited()
+    session.add.assert_not_called()
+
+
+def test_courier_status_service_saves_delivery_proof(courier):
+    shipment = make_shipment(status=ShipmentStatus.IN_TRANSIT)
+    shipment.courier_id = courier.id
+    session = AsyncMock()
+    session.add = Mock()
+    session.scalar.return_value = shipment
+
+    result = run(
+        update_courier_shipment_status_service(
+            shipment.id,
+            courier.id,
+            ShipmentStatus.DELIVERED,
+            session,
+            proof_image_url="https://example.com/proof.jpg",
+        )
+    )
+
+    assert result.status == ShipmentStatus.DELIVERED
+    assert result.proof_image_url == "https://example.com/proof.jpg"
+    assert result.delivered_at is not None
+    history = session.add.call_args.args[0]
+    assert history.status == ShipmentStatus.DELIVERED
+    session.commit.assert_awaited_once()
+
+
+def test_courier_status_service_rejects_unassigned_courier(courier):
+    shipment = make_shipment(status=ShipmentStatus.ASSIGNED)
+    shipment.courier_id = 999
+    session = AsyncMock()
+    session.add = Mock()
+    session.scalar.return_value = shipment
+
+    with pytest.raises(PermissionError, match="not assigned"):
+        run(
+            update_courier_shipment_status_service(
+                shipment.id,
+                courier.id,
+                ShipmentStatus.PICKED_UP,
+                session,
+            )
+        )
+
+    session.commit.assert_not_awaited()
+
+
+def test_tracking_service_returns_customer_and_courier_objects(customer, courier):
+    shipment = SimpleNamespace(
+        id=100,
+        tracking_number="TRX-20261023-0001",
+        status=ShipmentStatus.IN_TRANSIT,
+        sender_name=customer.name,
+        sender_phone="081234567890",
+        origin_address="Origin",
+        recipient_name="Recipient",
+        recipient_phone="081234567893",
+        destination_address="Destination",
+        package_description="Package",
+        weight_kg=2.5,
+        rejection_reason=None,
+        proof_image_url=None,
+        delivered_at=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session = AsyncMock()
+    session.execute.return_value = SimpleNamespace(
+        one_or_none=lambda: (shipment, customer, courier)
+    )
+    session.scalars.return_value = SimpleNamespace(all=lambda: [])
+
+    response = run(
+        get_shipment_tracking_service(
+            shipment.tracking_number,
+            session,
+        )
+    )
+
+    assert response["customer"] == {
+        "id": customer.id,
+        "name": customer.name,
+    }
+    assert response["courier"] == {
+        "id": courier.id,
+        "name": courier.name,
+    }
+    assert response["tracking_history"] == []
+
+
+def test_courier_shipments_router_passes_authenticated_courier(courier):
+    session = AsyncMock()
+    response = {"items": [], "total": 0, "page": 1, "limit": 20}
+    with patch(
+        "routers.shipment.get_courier_shipments_service",
+        return_value=response,
+    ) as service:
+        result = run(get_courier_shipments(session, courier, None, 1, 20))
+
+    service.assert_called_once_with(
+        courier_id=courier.id,
+        session=session,
+        tracking_number=None,
+        page=1,
+        limit=20,
+    )
+    assert result["data"] == response
+
+
+def test_courier_status_router_passes_delivery_proof(courier):
+    session = AsyncMock()
+    shipment = make_shipment(status=ShipmentStatus.DELIVERED)
+    payload = ShipmentStatusUpdatePayload(
+        status=ShipmentStatus.DELIVERED,
+        proof_image_url="https://example.com/proof.jpg",
+    )
+    with patch(
+        "routers.shipment.update_courier_shipment_status_service",
+        return_value=shipment,
+    ) as service:
+        result = run(
+            update_courier_shipment_status(
+                shipment.id,
+                payload,
+                session,
+                courier,
+            )
+        )
+
+    service.assert_called_once_with(
+        shipment_id=shipment.id,
+        courier_id=courier.id,
+        new_status=ShipmentStatus.DELIVERED,
+        session=session,
+        notes=None,
+        proof_image_url="https://example.com/proof.jpg",
+    )
+    assert result["data"] == shipment
+
+
 def test_create_shipment_router_maps_service_validation_error(customer):
     session = AsyncMock()
     session.add = Mock()
     payload = ShipmentCreatePayload(
+        origin_address="Origin",
+        sender_phone="081234567890",
         recipient_name="Recipient",
         recipient_phone="081234567893",
         destination_address="Destination",

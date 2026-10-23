@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from core.errors import error_payload, normalize_http_error
 
 # Routers
-from routers import admin, auth, shipment
+from routers import admin, auth, shipment, user
 
 app = FastAPI()
 
@@ -40,7 +40,9 @@ api_v1 = APIRouter(prefix="/api/v1")
 
 api_v1.include_router(auth.router)
 api_v1.include_router(shipment.router)
+api_v1.include_router(shipment.courier_router)
 api_v1.include_router(admin.router)
+api_v1.include_router(user.router)
 
 app.include_router(api_v1)
 

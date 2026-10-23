@@ -6,7 +6,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from core.config import settings
 from db.models.shipment import Shipment, ShipmentStatus, TrackingHistory
 from db.models.user import User, UserRole
 from schemas.shipment import ShipmentCreatePayload
@@ -17,14 +16,6 @@ async def create_shipment_service(
     current_user: User,
     session: AsyncSession,
 ) -> Shipment:
-    sender_phone = current_user.phone.strip() if current_user.phone else ""
-    origin_address = "USER_DEFAULT_ORIGIN_ADDRESS"
-
-    if not sender_phone:
-        raise ValueError("Authenticated user must have a phone number")
-    if not origin_address:
-        raise ValueError("Default origin address is not configured")
-
     business_date = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y%m%d")
     tracking_prefix = f"TRX-{business_date}-"
 
@@ -45,8 +36,8 @@ async def create_shipment_service(
         tracking_number=tracking_number,
         customer_id=current_user.id,
         sender_name=current_user.name,
-        sender_phone=sender_phone,
-        origin_address=origin_address,
+        sender_phone=payload.sender_phone,
+        origin_address=payload.origin_address,
         recipient_name=payload.recipient_name,
         recipient_phone=payload.recipient_phone,
         destination_address=payload.destination_address,
@@ -110,6 +101,105 @@ async def get_customer_shipments_service(
     }
 
 
+async def get_courier_shipments_service(
+    courier_id: int,
+    session: AsyncSession,
+    tracking_number: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> dict:
+    filters = [Shipment.courier_id == courier_id]
+    if tracking_number:
+        filters.append(
+            Shipment.tracking_number.ilike(f"%{tracking_number.strip()}%")
+        )
+
+    total = await session.scalar(
+        select(func.count(Shipment.id)).where(*filters)
+    )
+    shipments = (
+        await session.scalars(
+            select(Shipment)
+            .where(*filters)
+            .order_by(Shipment.created_at.desc(), Shipment.id.desc())
+            .offset((page - 1) * limit)
+            .limit(limit)
+        )
+    ).all()
+
+    return {
+        "items": shipments,
+        "total": total or 0,
+        "page": page,
+        "limit": limit,
+    }
+
+
+async def update_courier_shipment_status_service(
+    shipment_id: int,
+    courier_id: int,
+    new_status: ShipmentStatus,
+    session: AsyncSession,
+    notes: str | None = None,
+    proof_image_url: str | None = None,
+) -> Shipment:
+    shipment = await session.scalar(
+        select(Shipment)
+        .where(Shipment.id == shipment_id)
+        .with_for_update()
+    )
+
+    if shipment is None:
+        raise LookupError("Shipment not found")
+    if shipment.courier_id != courier_id:
+        raise PermissionError("You are not assigned to this shipment")
+
+    allowed_transitions = {
+        ShipmentStatus.ASSIGNED: ShipmentStatus.PICKED_UP,
+        ShipmentStatus.PICKED_UP: ShipmentStatus.IN_TRANSIT,
+        ShipmentStatus.IN_TRANSIT: ShipmentStatus.DELIVERED,
+    }
+    expected_status = allowed_transitions.get(shipment.status)
+    if expected_status != new_status:
+        raise ValueError(
+            f"Shipment status can only change from {shipment.status.value} "
+            f"to {expected_status.value if expected_status else 'a valid next status'}"
+        )
+
+    if new_status == ShipmentStatus.DELIVERED and not proof_image_url:
+        raise ValueError("proof_image_url is required when delivering a shipment")
+
+    shipment.status = new_status
+    if new_status == ShipmentStatus.DELIVERED:
+        shipment.proof_image_url = proof_image_url
+        shipment.delivered_at = datetime.now(ZoneInfo("UTC"))
+
+    default_notes = {
+        ShipmentStatus.PICKED_UP: "Shipment has been picked up by the courier.",
+        ShipmentStatus.IN_TRANSIT: "Shipment is in transit to the destination.",
+        ShipmentStatus.DELIVERED: "Shipment has been delivered by the courier.",
+    }
+    session.add(
+        TrackingHistory(
+            shipment_id=shipment.id,
+            status=new_status,
+            notes=notes or default_notes[new_status],
+            created_by=courier_id,
+        )
+    )
+
+    try:
+        await session.commit()
+        await session.refresh(shipment)
+    except IntegrityError as exc:
+        await session.rollback()
+        raise ValueError(
+            "Could not update shipment status due to a database constraint"
+        ) from exc
+
+    return shipment
+
+
 async def confirm_shipment_service(
     shipment_id: int,
     customer_id: int,
@@ -158,13 +248,20 @@ async def get_shipment_tracking_service(
     tracking_number: str,
     session: AsyncSession,
 ) -> dict:
-    shipment = await session.scalar(
-        select(Shipment).where(Shipment.tracking_number == tracking_number)
+    customer = aliased(User)
+    courier = aliased(User)
+    shipment_row = await session.execute(
+        select(Shipment, customer, courier)
+        .join(customer, Shipment.customer_id == customer.id)
+        .outerjoin(courier, Shipment.courier_id == courier.id)
+        .where(Shipment.tracking_number == tracking_number)
     )
 
-    if shipment is None:
+    result = shipment_row.one_or_none()
+    if result is None:
         raise LookupError("Shipment not found")
 
+    shipment, customer_user, courier_user = result
     tracking_history = (
         await session.scalars(
             select(TrackingHistory)
@@ -174,7 +271,20 @@ async def get_shipment_tracking_service(
     ).all()
 
     return {
+        "id": shipment.id,
         "tracking_number": shipment.tracking_number,
+        "customer": {
+            "id": customer_user.id,
+            "name": customer_user.name,
+        },
+        "courier": (
+            {
+                "id": courier_user.id,
+                "name": courier_user.name,
+            }
+            if courier_user is not None
+            else None
+        ),
         "status": shipment.status,
         "sender_name": shipment.sender_name,
         "sender_phone": shipment.sender_phone,

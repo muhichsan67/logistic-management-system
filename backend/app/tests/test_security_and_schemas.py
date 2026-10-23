@@ -11,7 +11,7 @@ from schemas.admin import (
     SystemSettingsPayload,
 )
 from schemas.auth import LoginPayload, RegisterPayload
-from schemas.shipment import ShipmentCreatePayload
+from schemas.shipment import ShipmentCreatePayload, ShipmentStatusUpdatePayload
 
 
 def test_password_hash_is_verifiable_and_not_plaintext():
@@ -41,6 +41,8 @@ def test_login_payload_requires_credentials():
 
 def test_shipment_payload_trims_text_and_validates_weight():
     payload = ShipmentCreatePayload(
+        origin_address=" Origin ",
+        sender_phone="081234567890",
         recipient_name=" Recipient ",
         recipient_phone="081234567890",
         destination_address=" Destination ",
@@ -64,6 +66,8 @@ def test_shipment_payload_trims_text_and_validates_weight():
 def test_shipment_payload_rejects_invalid_fields(field, value):
     payload = {
         "recipient_name": "Recipient",
+        "origin_address": "Origin",
+        "sender_phone": "081234567890",
         "recipient_phone": "081234567890",
         "destination_address": "Destination",
         "package_description": "Package",
@@ -80,6 +84,8 @@ def test_shipment_payload_rejects_invalid_weight(weight):
     with pytest.raises(ValidationError):
         ShipmentCreatePayload(
             recipient_name="Recipient",
+            origin_address="Origin",
+            sender_phone="081234567890",
             recipient_phone="081234567890",
             destination_address="Destination",
             package_description="Package",
@@ -114,3 +120,14 @@ def test_shipment_status_enum_contains_all_lifecycle_states():
         "DELIVERED",
         "COMPLETED",
     }
+
+
+def test_delivery_status_payload_requires_proof_image_url():
+    with pytest.raises(ValidationError, match="proof_image_url"):
+        ShipmentStatusUpdatePayload(status=ShipmentStatus.DELIVERED)
+
+
+def test_non_delivery_status_payload_does_not_require_proof_image_url():
+    payload = ShipmentStatusUpdatePayload(status=ShipmentStatus.PICKED_UP)
+
+    assert payload.proof_image_url is None

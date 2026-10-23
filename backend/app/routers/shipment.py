@@ -11,20 +11,95 @@ from schemas.shipment import (
     ShipmentCreateResponse,
     ShipmentDetailResponse,
     ShipmentListResponse,
+    ShipmentStatusUpdatePayload,
     ShipmentTrackingResponse,
 )
 from services.shipment import (
     confirm_shipment_service,
     create_shipment_service,
     get_customer_shipments_service,
+    get_courier_shipments_service,
     get_shipment_detail_service,
     get_shipment_tracking_service,
+    update_courier_shipment_status_service,
 )
 
 router = APIRouter(
     prefix="/shipments",
     tags=["shipments"],
 )
+
+courier_router = APIRouter(
+    prefix="/courier",
+    tags=["courier"],
+)
+
+@courier_router.get(
+    "/shipments",
+    response_model=BaseResponse[ShipmentListResponse],
+)
+async def get_courier_shipments(
+    session: SessionDep,
+    current_user: User = Depends(require_roles(UserRole.COURIER)),
+    tracking_number: str | None = Query(default=None, min_length=1),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> BaseResponse[ShipmentListResponse]:
+    shipments = await get_courier_shipments_service(
+        courier_id=current_user.id,
+        session=session,
+        tracking_number=tracking_number,
+        page=page,
+        limit=limit,
+    )
+
+    return {
+        "status": "success",
+        "message": "Courier shipments retrieved successfully",
+        "data": shipments,
+    }
+
+
+@courier_router.put(
+    "/shipments/{shipment_id}/status",
+    response_model=BaseResponse[ShipmentCreateResponse],
+)
+async def update_courier_shipment_status(
+    shipment_id: int,
+    payload: ShipmentStatusUpdatePayload,
+    session: SessionDep,
+    current_user: User = Depends(require_roles(UserRole.COURIER)),
+) -> BaseResponse[ShipmentCreateResponse]:
+    try:
+        shipment = await update_courier_shipment_status_service(
+            shipment_id=shipment_id,
+            courier_id=current_user.id,
+            new_status=payload.status,
+            session=session,
+            notes=payload.notes,
+            proof_image_url=payload.proof_image_url,
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"detail": str(exc), "code": "NOT_FOUND"},
+        ) from exc
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"detail": str(exc), "code": "FORBIDDEN"},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"detail": str(exc), "code": "INVALID_STATUS_TRANSITION"},
+        ) from exc
+
+    return {
+        "status": "success",
+        "message": "Shipment status updated successfully",
+        "data": shipment,
+    }
 
 
 @router.post(

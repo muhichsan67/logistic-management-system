@@ -73,6 +73,17 @@ All endpoints below are prefixed with `/api/v1`.
 | `POST` | `/auth/register` | Public | Register a customer account. |
 | `POST` | `/auth/login` | Public | Authenticate and receive a JWT bearer token. |
 
+### Current user profile
+
+| Method | Endpoint | Access | Description |
+|---|---|---|---|
+| `GET` | `/users/me` | Authenticated users | Get the current user's profile data. |
+| `PUT` | `/users/me` | Authenticated users | Update the current user's name, email, and phone. |
+
+The profile endpoints never return or update `password_hash`. The user's role
+and active state are also controlled by the backend and cannot be changed
+through the profile update endpoint.
+
 ### Customer shipments
 
 | Method | Endpoint | Access | Description |
@@ -82,6 +93,22 @@ All endpoints below are prefixed with `/api/v1`.
 | `PUT` | `/shipments/{id}/confirm` | `CUSTOMER` | Confirm a delivered shipment and change it to `COMPLETED`. |
 | `GET` | `/shipments/{id}/detail` | `ADMIN`, assigned `COURIER` | View shipment detail, customer, courier, and tracking history. |
 | `GET` | `/shipments/{tracking_number}/track` | Public | Track a shipment by tracking number. |
+
+### Courier shipments
+
+| Method | Endpoint | Access | Description |
+|---|---|---|---|
+| `GET` | `/courier/shipments` | `COURIER` | List only shipments assigned to the logged-in courier. |
+| `PUT` | `/courier/shipments/{id}/status` | `COURIER` | Advance an assigned shipment through the courier status workflow. |
+| `GET` | `/shipments/{id}/detail` | `COURIER` | View the detail of a shipment assigned to the logged-in courier. |
+
+The courier list supports `tracking_number`, `page`, and `limit` query
+parameters. The status endpoint accepts `status`, optional `notes`, and
+`proof_image_url`. It permits only `ASSIGNED -> PICKED_UP`,
+`PICKED_UP -> IN_TRANSIT`, and `IN_TRANSIT -> DELIVERED`. When changing from
+`IN_TRANSIT` to `DELIVERED`, the courier must send a non-empty
+`proof_image_url`; the service stores it and sets `delivered_at`. The existing
+shipment detail endpoint checks courier ownership before returning the detail.
 
 ### Admin dashboard and settings
 
