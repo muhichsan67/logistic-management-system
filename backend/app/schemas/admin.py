@@ -1,102 +1,82 @@
-from datetime import datetime
-from decimal import Decimal
+from datetime import date
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BeforeValidator, StringConstraints, model_validator
 
-from db.models.shipment import ShipmentStatus
+from app.schemas.base import APIModel, Email, Name, Password, Phone
+from app.schemas.shipment import ShipmentOut
 
-
-class ShipmentSummaryResponse(BaseModel):
-    pending_orders: int = Field(ge=0)
-    in_transit: int = Field(ge=0)
-    delivered_today: int = Field(ge=0)
-    rejected: int = Field(ge=0)
+Period = Literal["7d", "30d", "12m"]
 
 
-class SystemSettingsPayload(BaseModel):
-    pending_alert_timeout_minutes: int = Field(gt=0)
-    auto_complete_days: int = Field(gt=0)
-
-
-class SystemSettingsResponse(SystemSettingsPayload):
-    pass
-
-
-class CourierCreatePayload(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    email: str = Field(min_length=1, max_length=150)
-    phone: str = Field(min_length=8, max_length=20)
-    password: str = Field(min_length=8)
-
-
-class CourierUpdatePayload(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=100)
-    email: str | None = Field(default=None, min_length=1, max_length=150)
-    phone: str | None = Field(default=None, min_length=8, max_length=20)
-    password: str | None = Field(default=None, min_length=8)
-    is_active: bool | None = None
-
-
-class CourierResponse(BaseModel):
-    id: int
-    name: str
-    email: str
-    phone: str | None
-    role: str
-    is_active: bool
-    created_at: datetime
-    updated_at: datetime
-
-
-class CourierListResponse(BaseModel):
-    items: list[CourierResponse]
-    total: int
-    page: int
-    limit: int
-
-
-class CourierOption(BaseModel):
-    id: int
-    name: str
-
-
-class AssignShipmentPayload(BaseModel):
-    courier_id: int = Field(gt=0)
-
-
-class RejectShipmentPayload(BaseModel):
-    rejection_reason: str = Field(min_length=1)
-
-
-class AdminShipmentUser(BaseModel):
-    id: int
-    name: str
-
-
-class AdminShipmentListItem(BaseModel):
-    id: int
-    tracking_number: str
-    customer: AdminShipmentUser
-    courier: AdminShipmentUser | None
-    sender_name: str
-    sender_phone: str
-    origin_address: str
-    recipient_name: str
-    recipient_phone: str
-    destination_address: str
-    package_description: str
-    weight_kg: Decimal
-    status: ShipmentStatus
-    rejection_reason: str | None
-    proof_image_url: str | None
-    delivered_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
+class AdminShipmentOut(ShipmentOut):
     is_overdue_pending: bool
+    customer_name: str | None = None
+    courier_name: str | None = None
 
 
-class AdminShipmentListResponse(BaseModel):
-    items: list[AdminShipmentListItem]
-    total: int
-    page: int
-    limit: int
+# ---- Dashboard ----
+class DashboardTotals(APIModel):
+    active: int
+    pending: int
+    delivered_today: int
+    completed: int
+
+
+class VolumePoint(APIModel):
+    date: date
+    count: int
+
+
+class DashboardSummary(APIModel):
+    totals: DashboardTotals
+    volume_per_day: list[VolumePoint]
+    by_status: dict[str, int]
+
+
+# ---- Kurir ----
+class CourierCreate(APIModel):
+    name: Name
+    email: Email
+    phone: Phone
+    password: Password
+
+
+class CourierUpdate(APIModel):
+    name: Name | None = None
+    email: Email | None = None
+    phone: Phone | None = None
+    password: Password | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "CourierUpdate":
+        if all(getattr(self, f) is None for f in ("name", "email", "phone", "password")):
+            raise ValueError("Minimal satu field harus diisi")
+        return self
+
+
+# ---- Settings (nilai berupa string integer positif, sesuai kontrak) ----
+PositiveIntStr = Annotated[
+    str,
+    BeforeValidator(lambda v: str(v) if isinstance(v, int) and not isinstance(v, bool) else v),
+    StringConstraints(strip_whitespace=True, pattern=r"^[1-9]\d{0,5}$"),
+]
+
+
+class SystemSettingsOut(APIModel):
+    pending_alert_timeout_minutes: str
+    auto_complete_days: str
+
+
+class SystemSettingsUpdate(APIModel):
+    pending_alert_timeout_minutes: PositiveIntStr | None = None
+    auto_complete_days: PositiveIntStr | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "SystemSettingsUpdate":
+        if self.pending_alert_timeout_minutes is None and self.auto_complete_days is None:
+            raise ValueError("Minimal satu pengaturan harus diisi")
+        return self
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.model_dump(exclude_none=True)

@@ -1,52 +1,68 @@
-from fastapi import APIRouter, FastAPI, HTTPException, Request, status
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
 
-from core.errors import error_payload, normalize_http_error
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-# Routers
-from routers import admin, auth, shipment, user
+from app.core.config import get_settings
+from app.core.exceptions import register_exception_handlers
+from app.core.logging import setup_logging
+from app.core.middleware import RequestIDMiddleware
+from app.db.session import engine
+from app.jobs.auto_complete import create_scheduler
+from app.routers import api_router, files
 
-app = FastAPI()
+logger = logging.getLogger("app")
+
+TAGS = [
+    {"name": "Auth", "description": "Registrasi, login, refresh & logout"},
+    {"name": "Shipments", "description": "Aksi Customer + pelacakan publik"},
+    {"name": "Courier", "description": "Tugas & update status Kurir"},
+    {"name": "Uploads", "description": "Upload bukti pengiriman"},
+    {"name": "Admin", "description": "Manajemen Admin"},
+    {"name": "Health", "description": "Health check"},
+]
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(
-    request: Request,
-    exc: HTTPException,
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.status_code,
-        headers=exc.headers,
-        content=normalize_http_error(exc.detail, exc.status_code),
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+    s = get_settings()
+    scheduler = create_scheduler() if s.SCHEDULER_ENABLED else None
+    if scheduler:
+        scheduler.start()
+    logger.info("Aplikasi dimulai (%s)", s.ENVIRONMENT)
+    yield
+    if scheduler:
+        scheduler.shutdown(wait=False)
+    await engine.dispose()
+
+
+def create_app() -> FastAPI:
+    s = get_settings()
+    setup_logging(s.DEBUG)
+
+    app = FastAPI(
+        title=s.APP_NAME, version=s.APP_VERSION, openapi_tags=TAGS, lifespan=lifespan,
+        description="API sistem pelacakan paket **ALUR Logistik**. Klik **Authorize** dan tempel "
+                    "`access_token` dari `/auth/login`.",
+        docs_url=None if s.is_production else "/docs",
+        redoc_url=None if s.is_production else "/redoc",
+        openapi_url=None if s.is_production else f"{s.API_V1_PREFIX}/openapi.json",
     )
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(
-    request: Request,
-    exc: RequestValidationError,
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        content=error_payload(
-            "Request validation failed",
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "VALIDATION_ERROR",
-        ),
+    app.add_middleware(
+        CORSMiddleware, allow_origins=s.CORS_ORIGINS, allow_credentials=True,
+        allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Request-ID"],
     )
+    app.add_middleware(RequestIDMiddleware)
+    register_exception_handlers(app)
+    app.include_router(api_router, prefix=s.API_V1_PREFIX)
 
-api_v1 = APIRouter(prefix="/api/v1")
-
-api_v1.include_router(auth.router)
-api_v1.include_router(shipment.router)
-api_v1.include_router(shipment.courier_router)
-api_v1.include_router(admin.router)
-api_v1.include_router(user.router)
-
-app.include_router(api_v1)
+    app.include_router(files.router)  # harus SEBELUM mount StaticFiles di bawah
+    Path(s.UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+    app.mount(s.UPLOAD_URL_PREFIX, StaticFiles(directory=s.UPLOAD_DIR), name="static")
+    return app
 
 
-@app.get("/")
-async def read_root():
-    return {"Hello": "World"}
+app = create_app()

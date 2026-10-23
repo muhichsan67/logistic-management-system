@@ -1,99 +1,51 @@
-from typing import Annotated
+from collections.abc import AsyncIterator, Callable, Coroutine
+from typing import Annotated, Any
 
-import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from jwt.exceptions import InvalidTokenError
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from collections.abc import Callable
+from app.core.exceptions import ForbiddenError, UnauthorizedError
+from app.core.security import decode_token
+from app.db.models import User, UserRole
+from app.db.session import AsyncSessionLocal
 
-from core.config import settings
-from db.session import get_session
-from db.models.user import User
-from core.errors import error_payload
+# auto_error=False -> kita sendiri yang melempar 401 dengan format {detail, code}
+bearer_scheme = HTTPBearer(auto_error=False, description="Tempel **access_token** dari /auth/login")
 
-from db.models.user import UserRole
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+async def get_db() -> AsyncIterator[AsyncSession]:
+    """1 request = 1 session. Commit dilakukan di service; rollback otomatis bila error."""
+    async with AsyncSessionLocal() as session:
+        yield session
 
-SessionDep = Annotated[
-    AsyncSession,
-    Depends(get_session),
-]
+
+DBSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 async def get_current_user(
-    token: Annotated[str, Depends(oauth2_scheme)],
-    session: SessionDep,
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: DBSession,
 ) -> User:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=error_payload(
-            "Invalid or expired token",
-            status.HTTP_401_UNAUTHORIZED,
-            "UNAUTHORIZED",
-        ),
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-    try:
-        payload = jwt.decode(
-            token,
-            settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM],
-        )
-
-        user_id = payload.get("sub")
-
-        if user_id is None:
-            raise credentials_exception
-
-        user_id = int(user_id)
-
-    except (InvalidTokenError, ValueError):
-        raise credentials_exception
-
-    user = await session.get(User, user_id)
-
-    if user is None:
-        raise credentials_exception
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=error_payload(
-                "User account is inactive",
-                status.HTTP_403_FORBIDDEN,
-                "FORBIDDEN",
-            ),
-        )
-
+    if creds is None:
+        raise UnauthorizedError()
+    payload = decode_token(creds.credentials, "access")
+    user = await db.get(User, payload.user_id)
+    if user is None or not user.is_active:  # akun nonaktif ditolak di SETIAP request
+        raise UnauthorizedError()
     return user
 
 
-CurrentUser = Annotated[
-    User,
-    Depends(get_current_user),
-]
+CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def require_roles(
-    *allowed_roles: UserRole,
-) -> Callable:
-    async def role_checker(
-        current_user: CurrentUser,
-    ) -> User:
-        if current_user.role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=error_payload(
-                    "You don't have permission to access this resource",
-                    status.HTTP_403_FORBIDDEN,
-                    "FORBIDDEN",
-                ),
-            )
+def require_role(*roles: UserRole) -> Callable[..., Coroutine[Any, Any, User]]:
+    """Pakai di router: `APIRouter(dependencies=[Depends(require_role(UserRole.ADMIN))])`
+    atau di parameter: `user: User = Depends(require_role(UserRole.CUSTOMER))`."""
 
-        return current_user
+    async def checker(user: CurrentUser) -> User:
+        if user.role not in roles:
+            raise ForbiddenError()
+        return user
 
-    return role_checker
+    return checker

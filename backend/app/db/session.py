@@ -1,36 +1,15 @@
-from fastapi import Depends
-from typing import Annotated
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from collections.abc import AsyncGenerator
+from app.core.config import get_settings
 
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-
-from core.config import settings
-
-database_url = f"postgresql+psycopg://{settings.DATABASE_URL}"
+_s = get_settings()
 
 engine = create_async_engine(
-    database_url,
-    echo=True,
+    _s.DATABASE_URL,
+    pool_size=_s.DB_POOL_SIZE,
+    max_overflow=_s.DB_MAX_OVERFLOW,
+    pool_pre_ping=True,
+    echo=_s.DEBUG,
 )
 
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-)
-
-
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        yield session
-
-
-SessionDep = Annotated[
-    AsyncSession,
-    Depends(get_session),
-]
+AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

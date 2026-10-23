@@ -1,147 +1,116 @@
-from datetime import datetime
 from decimal import Decimal
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import Field
 
-from db.models.shipment import ShipmentStatus
+from app.db.models import ShipmentStatus
+from app.schemas.base import APIModel, Name, NonEmptyStr, Phone, UTCDateTime
 
-
-class ShipmentCreatePayload(BaseModel):
-    origin_address: str = Field(min_length=1)
-    sender_phone: str = Field(min_length=8, max_length=20)
-    recipient_name: str = Field(min_length=1, max_length=100)
-    recipient_phone: str = Field(min_length=8, max_length=20)
-    destination_address: str = Field(min_length=1)
-    package_description: str = Field(min_length=1)
-    weight_kg: Decimal = Field(gt=0, le=9999.99)
-
-    @field_validator(
-        "origin_address",
-        "sender_phone",
-        "recipient_name",
-        "recipient_phone",
-        "destination_address",
-        "package_description",
-    )
-    @classmethod
-    def trim_text(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Field must not be empty")
-        return value
-
-    @field_validator("sender_phone", "recipient_phone")
-    @classmethod
-    def validate_phone(cls, value: str) -> str:
-        if not value.lstrip("+").isdigit():
-            raise ValueError("Phone must contain only digits and may start with +")
-        return value
+Weight = Annotated[Decimal, Field(gt=0, max_digits=6, decimal_places=2, examples=[0.5])]
 
 
-class ShipmentCreateResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class ShipmentCreate(APIModel):
+    sender_name: Name
+    sender_phone: Phone
+    origin_address: NonEmptyStr
+    recipient_name: Name
+    recipient_phone: Phone
+    destination_address: NonEmptyStr
+    package_description: NonEmptyStr
+    weight_kg: Weight
 
+
+class ShipmentCreated(APIModel):
     id: int
     tracking_number: str
     status: ShipmentStatus
-    created_at: datetime
+    created_at: UTCDateTime
 
 
-class ShipmentStatusUpdatePayload(BaseModel):
-    status: ShipmentStatus
-    notes: str | None = Field(default=None, max_length=500)
-    proof_image_url: str | None = Field(default=None, min_length=1, max_length=255)
-
-    @field_validator("notes", "proof_image_url")
-    @classmethod
-    def trim_optional_text(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        return value or None
-
-    @model_validator(mode="after")
-    def require_delivery_proof(self) -> "ShipmentStatusUpdatePayload":
-        if self.status == ShipmentStatus.DELIVERED and not self.proof_image_url:
-            raise ValueError(
-                "proof_image_url is required when changing status to DELIVERED"
-            )
-        return self
-
-
-class ShipmentListItem(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
+class ShipmentOut(APIModel):
     id: int
     tracking_number: str
     status: ShipmentStatus
+    sender_name: str
+    sender_phone: str
+    origin_address: str
     recipient_name: str
+    recipient_phone: str
     destination_address: str
     package_description: str
     weight_kg: Decimal
-    created_at: datetime
-    updated_at: datetime
+    courier_id: int | None
+    rejection_reason: str | None
+    proof_image_url: str | None
+    delivered_at: UTCDateTime | None
+    created_at: UTCDateTime
 
 
-class ShipmentListResponse(BaseModel):
-    items: list[ShipmentListItem]
-    total: int
-    page: int
-    limit: int
-
-
-class ShipmentUserResponse(BaseModel):
-    id: int
-    name: str
-
-
-class TrackingHistoryResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
+class TrackingHistoryOut(APIModel):
     status: ShipmentStatus
     notes: str
-    created_at: datetime
+    created_at: UTCDateTime
 
 
-class ShipmentDetailResponse(BaseModel):
-    id: int
+class TrackResponse(APIModel):
     tracking_number: str
-    customer: ShipmentUserResponse
-    courier: ShipmentUserResponse | None
-    sender_name: str
-    sender_phone: str
-    origin_address: str
-    recipient_name: str
-    recipient_phone: str
-    destination_address: str
-    package_description: str
-    weight_kg: Decimal
-    status: ShipmentStatus
-    rejection_reason: str | None
-    proof_image_url: str | None
-    delivered_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-    tracking_history: list[TrackingHistoryResponse]
-
-
-class ShipmentTrackingResponse(BaseModel):
-    id: int
-    tracking_number: str
-    customer: ShipmentUserResponse
-    courier: ShipmentUserResponse | None
     status: ShipmentStatus
     sender_name: str
-    sender_phone: str
-    origin_address: str
     recipient_name: str
-    recipient_phone: str
     destination_address: str
-    package_description: str
-    weight_kg: Decimal
-    rejection_reason: str | None
-    proof_image_url: str | None
-    delivered_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-    tracking_history: list[TrackingHistoryResponse]
+    history: list[TrackingHistoryOut]  # terlama -> terbaru
+
+
+class HistoryDetailOut(TrackingHistoryOut):
+    created_by_name: str | None = None  # hanya diisi untuk Admin
+
+
+class ShipmentDetail(ShipmentOut):
+    """Detail 1 shipment + riwayat. Dipakai Customer (by resi), Kurir & Admin (by id)."""
+
+    customer_id: int
+    customer_name: str | None = None
+    courier_name: str | None = None
+    courier_phone: str | None = None
+    history: list[HistoryDetailOut]  # terlama -> terbaru
+
+
+class ConfirmResponse(APIModel):
+    message: str = "Pesanan dikonfirmasi selesai"
+    current_status: ShipmentStatus
+
+
+class StatusUpdateResponse(APIModel):
+    message: str = "Status berhasil diperbarui"
+    current_status: ShipmentStatus
+
+
+class CourierStatusUpdate(APIModel):
+    status: ShipmentStatus
+    notes: NonEmptyStr | None = None
+    proof_image_url: Annotated[str, Field(max_length=255)] | None = None
+
+
+class AssignRequest(APIModel):
+    courier_id: int = Field(gt=0)
+    notes: NonEmptyStr | None = None
+
+
+class AssignResponse(APIModel):
+    message: str = "Kurir berhasil ditugaskan"
+    shipment_id: int
+    status: ShipmentStatus
+
+
+class RejectRequest(APIModel):
+    rejection_reason: NonEmptyStr
+
+
+class RejectResponse(APIModel):
+    message: str = "Delivery request ditolak"
+    shipment_id: int
+    status: ShipmentStatus
+
+
+class UploadResponse(APIModel):
+    url: str

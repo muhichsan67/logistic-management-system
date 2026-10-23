@@ -1,64 +1,44 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, Response, status
 
-from core.errors import error_payload
-from db.session import SessionDep
-
-# Models
-from db.models.user import User
-
-# Schemas
-from schemas.auth import RegisterPayload, LoginPayload
-
-# Services
-from services.auth import register_user_service, login_user_service
-
-router = APIRouter(
-    prefix="/auth",
-    tags=["auth"],
-    responses={404: {"description": "Not found"}},
+from app.core.deps import CurrentUser, DBSession
+from app.core.rate_limit import rate_limit
+from app.schemas.auth import (
+    LoginRequest, RefreshRequest, RegisterRequest, RegisterResponse, TokenResponse, UserOut,
 )
+from app.schemas.common import error_responses
+from app.services import auth_service
+
+router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
-@router.post("/login")
-async def login(session: SessionDep, credentials: LoginPayload):
-    try:
-        login_data = await login_user_service(session, credentials)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=401,
-            detail=error_payload(
-                str(exc),
-                status.HTTP_401_UNAUTHORIZED,
-                "UNAUTHORIZED",
-            ),
-        ) from exc
-
-    return {
-        "status": "success",
-        "message": "User logged in successfully",
-        "data": login_data,
-    }
+@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED,
+             summary="Registrasi Customer",
+             dependencies=[Depends(rate_limit())], responses=error_responses(409, 422, 429))
+async def register(data: RegisterRequest, db: DBSession) -> RegisterResponse:
+    user = await auth_service.register_customer(db, data)
+    return RegisterResponse(user_id=user.id)
 
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(session: SessionDep, payload: RegisterPayload):
-    try:
-        user: User = await register_user_service(
-            payload,
-            session,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=error_payload(
-                str(exc),
-                status.HTTP_409_CONFLICT,
-                "DUPLICATE",
-            ),
-        ) from exc
+@router.post("/login", response_model=TokenResponse, summary="Login (email + password)",
+             dependencies=[Depends(rate_limit())], responses=error_responses(401, 422, 429))
+async def login(data: LoginRequest, db: DBSession) -> TokenResponse:
+    return await auth_service.login(db, data.email, data.password)
 
-    return {
-        "status": "success",
-        "message": "User registered successfully",
-        "data": user,
-    }
+
+@router.post("/refresh", response_model=TokenResponse, summary="Tukar refresh token (rotation)",
+             dependencies=[Depends(rate_limit())], responses=error_responses(401, 422, 429))
+async def refresh(data: RefreshRequest, db: DBSession) -> TokenResponse:
+    return await auth_service.refresh(db, data.refresh_token)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, summary="Cabut refresh token",
+             responses=error_responses(422))
+async def logout(data: RefreshRequest, db: DBSession) -> Response:
+    await auth_service.logout(db, data.refresh_token)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/me", response_model=UserOut, summary="Profil user yang sedang login",
+            responses=error_responses(401))
+async def me(user: CurrentUser) -> UserOut:
+    return UserOut.model_validate(user)
